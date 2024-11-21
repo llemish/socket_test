@@ -165,7 +165,7 @@ class Server:
             self._users[new_user.sock] = new_user
         else:
             logging.info(f'Too many users, connection denied')
-            sock.send(b'Достигнуто предельное количество пользователей!')
+            sock.send('Достигнуто предельное количество пользователей!'.encode())
             sock.close()
 
     def _get_user_message(self, sel, sock, mask):
@@ -186,12 +186,31 @@ class Server:
             return False
 
         # Send
-        logging.debug(f'Send {new_data} to {addr}')
+        self._send_message(sock, new_data)
+
+        # logging.debug(f'Send {new_data} to {addr}')
+        # try:
+        #     if len(new_data) > self._config.max_message_length:
+        #         pass
+        #     else:
+        #         sock.send(new_data)
+        # except ConnectionError:
+        #     logging.warning(f'Client {addr} suddenly closed')
+        #     return False
+
+    def _send_message(self, sock, data):
+        addr = sock.getpeername()
+        logging.debug(f'Send {data} to {addr}')
+
         try:
-            sock.send(new_data)
+            if len(data) > self._config.max_message_length:
+                pass
+            else:
+                sock.send(data)
         except ConnectionError:
             logging.warning(f'Client {addr} suddenly closed')
             return False
+        return True
 
     def _handle_message(self, data, sock):
         message = Message(data)
@@ -202,7 +221,7 @@ class Server:
         if message.is_command:
             new_data = self._command_handler(message.target_user, message.message, sock)
         else:
-            new_data = self._send_message(message.target_user, message.message, sock)
+            new_data = self._send_message_to_user(message.target_user, message.message, sock)
         return new_data
 
     def _command_handler(self, command, parameter, sock):
@@ -217,9 +236,21 @@ class Server:
                 new_data = f'Имя успешно сменено на {name}'
             else:
                 new_data = 'Имя занято, выберите другое'
-        return new_data
+        return new_data.encode()
 
-    def _send_message(self, target_user, message, sock):
-        pass
+    def _send_message_to_user(self, target_user, message, sock):
+
+        target_socket = None
+        for key in self._users:
+            if self._users[key].name == target_user:
+                target_socket = self._users[key].sock
+                break
+        if target_socket is None:
+            return False
+
+        message = self._users[sock].name + ':' + message
+        success = self._send_message(target_socket, message)
+
+        return success
 
 s = Server()
