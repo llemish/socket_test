@@ -35,7 +35,7 @@ if __name__ == "__main__":
             def on_get_message():
                 data = sock.recv(1024)
                 data = data.decode()
-                print('Received: ' + data)
+                print('\n\t\t\t\t\t' + data)
 
             sock.connect((HOST, PORT))
             print("Client connected")
@@ -47,4 +47,5 @@ if __name__ == "__main__":
                 for key, mask in events:
                     callback = key.data
                     callback()
+                sleep(1)
 
