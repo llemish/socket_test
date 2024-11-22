@@ -22,6 +22,8 @@ class ConfigReader:
                     elif key == 'PORT':
                         self._port = int(value)
                     elif key == 'MAX_MESSAGE_LENGTH':
+                        if int(value) > 1024:
+                            value = 1024
                         self._max_message_length = int(value)
                     elif key == 'MAX_USER':
                         self._max_user = int(value)
@@ -102,19 +104,19 @@ class Message:
     def _handle(self, raw_data):
         data = raw_data.strip().decode()
 
-        if len(data) > 3 and (':' in data or data[:2] == '/*'):
+        if len(data) > 3 and (':' in data or data[:2] == '*/'):
             self._is_correct = True
 
-            if data[:2] == '/*':
+            if data[:2] == '*/':
                 self._is_command = True
                 if ':' in data:
-                    self._target_user = data.split(':')[0][2:]
-                    self._message = data.split(':')[1]
+                    self._target_user = data.split(':')[0].strip()[2:]
+                    self._message = data.split(':')[1].strip()
                 else:
-                    self._target_user = data[2:]
+                    self._target_user = data[2:].strip()
             else:
-                self._target_user = data.split(':')[0]
-                self._message = data.split(':')[1]
+                self._target_user = data.split(':')[0].strip()
+                self._message = data.split(':')[1].strip()
 
 
 class Server:
@@ -125,8 +127,10 @@ class Server:
         logging.basicConfig(level=logg_level, filename='syslog.log', filemode='a',
                             format="%(asctime)s:%(module)s:%(levelname)s:%(message)s")
         self._users = dict()
+
+        self._sel = selectors.DefaultSelector()
+
         self._run_server()
-        self._user_id = 0
 
     def _get_logg_level(self):
         level = logging.DEBUG
@@ -145,36 +149,45 @@ class Server:
             server_sock.bind(('', self._config.port))
             server_sock.listen(5)
             logging.debug('Server started')
-            sel = selectors.DefaultSelector()
-            sel.register(server_sock, selectors.EVENT_READ, self._new_connection)
+            # sel = selectors.DefaultSelector()
+            self._sel.register(server_sock, selectors.EVENT_READ, self._new_connection)
             while True:
                 logging.debug("Waiting for connections or data...")
-                events = sel.select()
+                events = self._sel.select()
                 for key, mask in events:
                     callback = key.data
-                    callback(sel, key.fileobj, mask)
+                    try:
+                        success = callback(key.fileobj, mask)
+                        if not success:
+                            self._delete_user(key.fileobj)
+                    except OSError:
+                        logging.warning(f'Client {key.fileobj} suddenly disconnected!')
+                        sock = key.fileobj
+                        self._sel.unregister(sock)
+                        if sock in self._users:
+                            del self._users[sock]
 
-    def _new_connection(self, sel, server_sock, mask):
+    def _new_connection(self, server_sock, mask):
         sock, addr = server_sock.accept()
         if len(self._users) <= self._config.max_user:
-            sel.register(sock, selectors.EVENT_READ, self._get_user_message)
+            self._sel.register(sock, selectors.EVENT_READ, self._get_user_message)
             logging.debug(f'New connection from {addr}')
-            new_user = User(self._user_id)
-            self._user_id += 1
+            new_user = User('noname')
             new_user.sock = sock
             self._users[new_user.sock] = new_user
         else:
             logging.info(f'Too many users, connection denied')
-            sock.send('Достигнуто предельное количество пользователей!'.encode())
+            sock.sendall('Достигнуто предельное количество пользователей!'.encode())
             sock.close()
+        return True
 
-    def _get_user_message(self, sel, sock, mask):
+    def _get_user_message(self, sock, mask):
         addr = sock.getpeername()
         logging.debug(f'Get new message from {addr}')
 
         # Receive
         try:
-            data = sock.recv(self._config.max_message_length)
+            data = sock.recv(1024)
         except ConnectionError:
             logging.warning(f'Client {addr} suddenly closed')
             return False
@@ -186,27 +199,31 @@ class Server:
             return False
 
         # Send
-        self._send_message(sock, new_data)
+        success = self._send_message(sock, new_data)
+        return success
 
-        # logging.debug(f'Send {new_data} to {addr}')
-        # try:
-        #     if len(new_data) > self._config.max_message_length:
-        #         pass
-        #     else:
-        #         sock.send(new_data)
-        # except ConnectionError:
-        #     logging.warning(f'Client {addr} suddenly closed')
-        #     return False
+    def _delete_user(self, sock):
+        logging.info(f'Delete user from socket {sock}')
+        del self._users[sock]
+        self._sel.unregister(sock)
+
+    def _get_user_names(self):
+        names = [self._users[user].name for user in self._users]
+        return names
+
+    # def _send_names(self, sock):
+    #     names = self._get_user_names()
+    #     data = f'Доступные пользователи: {names}'
+    #     self._send_message(sock, data)
 
     def _send_message(self, sock, data):
+        if isinstance(data, str):
+            data = data.encode()
         addr = sock.getpeername()
         logging.debug(f'Send {data} to {addr}')
 
         try:
-            if len(data) > self._config.max_message_length:
-                pass
-            else:
-                sock.send(data)
+            sock.sendall(data)
         except ConnectionError:
             logging.warning(f'Client {addr} suddenly closed')
             return False
@@ -216,27 +233,34 @@ class Server:
         message = Message(data)
 
         if not message.is_correct:
-            return False
+            return 'Неверный формат сообщения или команды'.encode()
 
         if message.is_command:
             new_data = self._command_handler(message.target_user, message.message, sock)
         else:
-            new_data = self._send_message_to_user(message.target_user, message.message, sock)
-        return new_data
+            success = self._send_message_to_user(message.target_user, message.message, sock)
+            if success:
+                new_data = f'Сообщение отправлено {message.target_user}'
+            else:
+                new_data = f'Не удалось отправить сообщение {message.target_user}'
+        return new_data.encode()
 
     def _command_handler(self, command, parameter, sock):
-        new_data = False
+        new_data = f'Команда {command} не найдена'
         if command == 'init':
             new_data = str(self._config.max_message_length)
         elif command in ['registration', 'change_name']:
             name = parameter
-            names = [user.name for user in self._users if user.name == name]
-            if names == list():
+            names = self._get_user_names()
+            if name in names:
+                new_data = 'Имя занято, выберите другое'
+            else:
                 self._users[sock].name = name
                 new_data = f'Имя успешно сменено на {name}'
-            else:
-                new_data = 'Имя занято, выберите другое'
-        return new_data.encode()
+        elif command == 'who':
+            names = self._get_user_names()
+            new_data = f'Доступные пользователи: {names}'
+        return new_data
 
     def _send_message_to_user(self, target_user, message, sock):
 
@@ -248,7 +272,8 @@ class Server:
         if target_socket is None:
             return False
 
-        message = self._users[sock].name + ':' + message
+        # message = self._users[sock].name + ':' + message
+        message = f'Сообщение от {self._users[sock].name}: {message}'
         success = self._send_message(target_socket, message)
 
         return success
