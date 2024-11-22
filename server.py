@@ -126,8 +126,8 @@ class Server:
         logg_level = self._get_logg_level()
         logging.basicConfig(level=logg_level, filename='syslog.log', filemode='a',
                             format="%(asctime)s:%(module)s:%(levelname)s:%(message)s")
-        self._users = dict()
 
+        self._users = dict()
         self._sel = selectors.DefaultSelector()
 
         self._run_server()
@@ -149,7 +149,6 @@ class Server:
             server_sock.bind(('', self._config.port))
             server_sock.listen(5)
             logging.debug('Server started')
-            # sel = selectors.DefaultSelector()
             self._sel.register(server_sock, selectors.EVENT_READ, self._new_connection)
             while True:
                 logging.debug("Waiting for connections or data...")
@@ -157,7 +156,7 @@ class Server:
                 for key, mask in events:
                     callback = key.data
                     try:
-                        success = callback(key.fileobj, mask)
+                        success = callback(key.fileobj)
                         if not success:
                             self._delete_user(key.fileobj)
                     except OSError:
@@ -167,7 +166,7 @@ class Server:
                         if sock in self._users:
                             del self._users[sock]
 
-    def _new_connection(self, server_sock, mask):
+    def _new_connection(self, server_sock):
         sock, addr = server_sock.accept()
         if len(self._users) <= self._config.max_user:
             self._sel.register(sock, selectors.EVENT_READ, self._get_user_message)
@@ -181,7 +180,7 @@ class Server:
             sock.close()
         return True
 
-    def _get_user_message(self, sock, mask):
+    def _get_user_message(self, sock):
         addr = sock.getpeername()
         logging.debug(f'Get new message from {addr}')
 
@@ -210,11 +209,6 @@ class Server:
     def _get_user_names(self):
         names = [self._users[user].name for user in self._users]
         return names
-
-    # def _send_names(self, sock):
-    #     names = self._get_user_names()
-    #     data = f'Доступные пользователи: {names}'
-    #     self._send_message(sock, data)
 
     def _send_message(self, sock, data):
         if isinstance(data, str):
@@ -260,6 +254,9 @@ class Server:
         elif command == 'who':
             names = self._get_user_names()
             new_data = f'Доступные пользователи: {names}'
+        elif command == 'exit':
+            new_data = 'Bye!'
+            self._delete_user(sock)
         return new_data
 
     def _send_message_to_user(self, target_user, message, sock):
@@ -272,7 +269,6 @@ class Server:
         if target_socket is None:
             return False
 
-        # message = self._users[sock].name + ':' + message
         message = f'Сообщение от {self._users[sock].name}: {message}'
         success = self._send_message(target_socket, message)
 
